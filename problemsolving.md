@@ -24,6 +24,7 @@
 | Find max and min in an array | Easy       | Practice on paper first                                       |
 | Reverse an array             | Easy       | [LeetCode 344](https://leetcode.com/problems/reverse-string/) |
 | Count vowels in a string     | Easy       | Practice on paper first                                       |
+| reverse-vowels-of-a-string     | Easy       | [LeetCode 345](https://leetcode.com/problems/reverse-vowels-of-a-string/)                                       |
 
 ### Real World Connection
 
