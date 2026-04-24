@@ -48,15 +48,35 @@ Every app you use relies on arrays constantly.
 - Palindrome checking
 - Comparing characters from both ends
 
+### Two Pointer Types
+
+| Type | Description |
+| --- | --- |
+| **Inward** | Two pointers start at opposite ends and move toward each other |
+| **Unidirectional** | Both pointers move in the same direction (also called fast/slow) |
+| **Staggered** | Two pointers traverse two separate arrays/lists at different speeds |
+
 ### Practice Problems
 
-| Problem                               | Difficulty | Link                                                                      |
-| ------------------------------------- | ---------- | ------------------------------------------------------------------------- |
-| Check if string is a palindrome       | Easy       | [LeetCode 125](https://leetcode.com/problems/valid-palindrome/)           |
-| Find all pairs that sum to X          | Easy       | Practice on paper first                                                   |
-| Remove duplicate characters           | Easy       | [LeetCode 316](https://leetcode.com/problems/remove-duplicate-letters/)   |
-| Check if two strings are permutations | Easy       | [LeetCode 242](https://leetcode.com/problems/valid-anagram/)              |
-| Intersection of two arrays            | Easy       | [LeetCode 349](https://leetcode.com/problems/intersection-of-two-arrays/) |
+| Problem | Difficulty | Type | Link |
+| --- | --- | --- | --- |
+| Check if string is a palindrome | Easy | Inward | [LeetCode 125](https://leetcode.com/problems/valid-palindrome/) |
+| Palindrome Number | Easy | Inward | [LeetCode 9](https://leetcode.com/problems/palindrome-number/) |
+| Move Zeroes | Easy | Unidirectional | [LeetCode 283](https://leetcode.com/problems/move-zeroes/) |
+| Sort Array By Parity | Easy | Unidirectional | [LeetCode 905](https://leetcode.com/problems/sort-array-by-parity/) |
+| Two Sum IV - Input is a BST | Easy | Inward | [LeetCode 653](https://leetcode.com/problems/two-sum-iv-input-is-a-bst/) |
+| Merge Two Sorted Lists | Easy | Staggered | [LeetCode 21](https://leetcode.com/problems/merge-two-sorted-lists/) |
+| Find all pairs that sum to X | Easy | Inward | Practice on paper first |
+| Remove duplicate characters | Easy | Unidirectional | [LeetCode 316](https://leetcode.com/problems/remove-duplicate-letters/) |
+| Check if two strings are permutations | Easy | Staggered | [LeetCode 242](https://leetcode.com/problems/valid-anagram/) |
+| Intersection of two arrays | Easy | Staggered | [LeetCode 349](https://leetcode.com/problems/intersection-of-two-arrays/) |
+| K-diff Pairs in an Array | Medium | Inward | [LeetCode 532](https://leetcode.com/problems/k-diff-pairs-in-an-array/) |
+| Container With Most Water | Medium | Inward | [LeetCode 11](https://leetcode.com/problems/container-with-most-water/) |
+| Max Consecutive Ones III | Medium | Unidirectional | [LeetCode 1004](https://leetcode.com/problems/max-consecutive-ones-iii/) |
+| Longest Word in Dictionary Through Deleting | Medium | Staggered | [LeetCode 524](https://leetcode.com/problems/longest-word-in-dictionary-through-deleting/) |
+| 3Sum | Medium | Inward | [LeetCode 15](https://leetcode.com/problems/3sum/) |
+| Subarrays with K Different Integers | Hard | Unidirectional | [LeetCode 992](https://leetcode.com/problems/subarrays-with-k-different-integers/) |
+| 4Sum | Hard | Inward | [LeetCode 18](https://leetcode.com/problems/4sum/) |
 
 ### Real World Connection
 
