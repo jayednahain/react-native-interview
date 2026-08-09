@@ -214,6 +214,33 @@ SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c  ← Signature (HMAC-SHA256)
 
 The server signs the token with a secret key. When the server receives a token, it verifies the signature — if valid, it trusts the payload **without querying the database**. This is what makes JWTs stateless.
 
+> ### The JWT trade-off nobody mentions until it bites
+>
+> "Stateless" and "revocable" are opposites. Because the server doesn't check a
+> database, it also **cannot un-issue a token**. A user taps "Log out of all devices",
+> or you ban an account, or a token leaks — that token stays valid until it expires,
+> no matter what your database says.
+>
+> The standard mitigations:
+> - **Short access token lifetime** (5–15 min), so the damage window is small. This is
+>   the main reason for the access/refresh split — not convenience.
+> - **A revocation list** for refresh tokens (they're few and long-lived, so checking
+>   them is cheap). Revoking the refresh token means the session dies at the next
+>   access-token expiry.
+> - **A `tokenVersion` claim** stored on the user row. Bump it to invalidate every
+>   token that user holds — but this costs you a DB read per request, which trades
+>   away the statelessness you chose JWTs for.
+>
+> Being able to say *"JWTs buy scale and cost you instant revocation, and here's how
+> I'd manage that"* is worth more than reciting the three-part structure.
+
+Two more things the JWT payload must never do:
+- **Never store secrets in it.** The payload is base64, not encrypted. Anyone holding
+  the token can read every claim. It is signed (tamper-proof), not hidden.
+- **Never trust an unverified token on the client.** Your app can decode the payload
+  to show a username or check expiry for UX, but authorisation decisions belong on
+  the server, every time.
+
 ### Token Flow in React Native
 
 ```javascript
@@ -469,6 +496,80 @@ CREATE INDEX idx_users_email ON users(email);
 - Columns used in ORDER BY
 
 **Trade-off:** Indexes speed up reads but slow down writes (the index must be updated on every insert/update/delete). Don't index every column.
+
+### The N+1 Query Problem
+
+The single most common backend performance bug, and a frequent interview question.
+
+```javascript
+// ❌ N+1 — 1 query for the orders, then 1 MORE per order for its user.
+// 100 orders = 101 round trips to the database.
+const orders = await db.query('SELECT * FROM orders LIMIT 100');
+
+for (const order of orders) {
+  order.user = await db.query('SELECT * FROM users WHERE id = $1', [order.user_id]);
+}
+```
+
+Each query might take only 2ms, but 101 × 2ms = 200ms of pure waiting — and it gets linearly worse as data grows. Two fixes:
+
+```javascript
+// ✅ Fix 1 — JOIN. One query, the database does the work.
+const orders = await db.query(`
+  SELECT o.*, u.name AS user_name, u.email AS user_email
+  FROM orders o
+  JOIN users u ON u.id = o.user_id
+  LIMIT 100
+`);
+
+// ✅ Fix 2 — batch load. Two queries total, regardless of how many orders.
+const orders = await db.query('SELECT * FROM orders LIMIT 100');
+const userIds = [...new Set(orders.map(o => o.user_id))];
+
+const users = await db.query('SELECT * FROM users WHERE id = ANY($1)', [userIds]);
+const usersById = new Map(users.map(u => [u.id, u]));
+
+orders.forEach(o => { o.user = usersById.get(o.user_id); });
+```
+
+> **Where it hides:** ORMs (Prisma, TypeORM, Sequelize) and GraphQL resolvers cause
+> this constantly, because the lazy `order.user` lookup looks like a property access,
+> not a database call. GraphQL's standard answer is **DataLoader**, which batches all
+> the per-item lookups in one tick into a single query — Fix 2, automated.
+>
+> As a mobile dev you often *notice* this first: an endpoint that's fast with test
+> data and crawls in production is N+1 until proven otherwise.
+
+### Connection Pooling
+
+Opening a database connection costs ~10–50ms (TCP handshake, TLS, authentication). Doing that per request is wasteful, and databases cap total connections (Postgres defaults to ~100).
+
+A **pool** keeps a set of open connections and lends them out:
+
+```javascript
+import { Pool } from 'pg';
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  max: 20,                      // Max connections THIS instance holds
+  idleTimeoutMillis: 30000,     // Return idle connections after 30s
+  connectionTimeoutMillis: 5000, // Fail fast if the pool is exhausted
+});
+
+// Borrow → use → always return
+const client = await pool.connect();
+try {
+  await client.query('SELECT 1');
+} finally {
+  client.release();   // Forgetting this leaks a connection until the pool is dry
+}
+```
+
+> **The horizontal scaling trap (ties Floor 3 to Floor 5):** `max: 20` is *per
+> instance*. Scale to 10 pods and you've asked for 200 connections from a database
+> that allows 100 — your deployment succeeds and the database starts refusing
+> connections. Either lower `max` per instance, or put a pooler like **PgBouncer**
+> in front. This is a genuinely common production incident.
 
 ---
 
@@ -898,6 +999,50 @@ const sendMessage = (text) => {
 
 ## 4.10 API Security
 
+### Password Storage
+
+Passwords are **never** stored, and never encrypted — they are **hashed with a slow, salted algorithm**. Encryption is reversible; that's exactly what you don't want.
+
+```javascript
+import argon2 from 'argon2';   // Or bcrypt — both are correct choices
+
+// Registration — hash before storing. The salt is generated and embedded automatically.
+const register = async (email, password) => {
+  const passwordHash = await argon2.hash(password);
+  await db.query(
+    'INSERT INTO users (email, password_hash) VALUES ($1, $2)',
+    [email, passwordHash],
+  );
+};
+
+// Login — verify against the stored hash. You never decrypt anything.
+const login = async (email, password) => {
+  const user = await db.oneOrNone('SELECT * FROM users WHERE email = $1', [email]);
+
+  // Always run a verify even when the user doesn't exist, and always return the
+  // same error — otherwise response timing and wording tell an attacker which
+  // emails are registered (user enumeration).
+  const valid = user
+    ? await argon2.verify(user.password_hash, password)
+    : await argon2.verify(DUMMY_HASH, password).catch(() => false);
+
+  if (!user || !valid) throw new AuthError('Invalid email or password');
+
+  return issueTokens(user);
+};
+```
+
+| Use | Never use |
+|-----|-----------|
+| Argon2id (current recommendation), bcrypt, scrypt | MD5, SHA-1, SHA-256 — fast hashes, brute-forceable at billions/sec |
+| A per-password salt (these libraries do it for you) | A single global salt, or no salt |
+| Rate limiting + lockout on the login endpoint | Unlimited login attempts |
+
+> **Why "slow" is the point.** A GPU computes billions of SHA-256 hashes per second.
+> Argon2 and bcrypt are deliberately expensive in time *and memory*, so an attacker
+> who steals your database still can't feasibly reverse the hashes. If your login
+> feels instant to compute, it's insecure.
+
 ### Input Validation
 
 Never trust data from the client. Validate everything on the server.
@@ -974,6 +1119,9 @@ app.use(cors({
 | SQL | ACID, JOINs, transactions. Best for structured relational data. |
 | NoSQL | Flexible schema. Each type optimized for a different access pattern. |
 | Indexes | O(log n) lookups. Trade write speed for read speed. |
+| N+1 queries | 1 query becomes 101. Fix with JOIN, batch loading, or DataLoader. |
+| Connection pooling | Reuse connections. `max` is per instance — watch it when scaling out. |
+| Password hashing | Argon2/bcrypt, salted and slow. Never MD5/SHA. Never reversible. |
 | Transactions | Atomic. All or nothing. Prevents half-updated state. |
 | Deadlocks | Circular lock waiting. Fix: consistent order, timeouts, optimistic locking. |
 | Cache-aside | Check cache first. Miss → load DB → populate cache. |
@@ -987,4 +1135,4 @@ app.use(cors({
 
 ---
 
-*Next: Floor 5 — Infrastructure and DevOps*
+*Previous: [Floor 3.5 — Mobile System Design](../Floor3.5-Mobile-System-Design/resource.md) · Next: [Floor 5 — Infrastructure and DevOps](../Floor5-Infrastructure/resource.md) · [Index](../README.md)*

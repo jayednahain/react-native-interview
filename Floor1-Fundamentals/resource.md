@@ -1,6 +1,6 @@
 # Floor 1 — Fundamentals
 
-> **Prerequisites:** None. This is the foundation everything else is built on.
+> **Prerequisites:** [Floor 0 — The Design Process](../Floor0-The-Design-Process/resource.md). This is the foundation everything else is built on.
 > **You already know:** Most of this as a React Native developer. This floor names it properly and fills gaps.
 
 ---
@@ -377,7 +377,7 @@ navHistory.peek();  // Current screen: FeedScreen
 
 // Undo/redo pattern
 const undoStack = new Stack();
-const redoStack = new Stack();
+let redoStack = new Stack();   // `let` — this one gets reassigned below
 
 const applyChange = (change) => {
   undoStack.push(change);
@@ -508,17 +508,22 @@ const prefs = raw ? JSON.parse(raw) : null;
 // Delete
 await AsyncStorage.removeItem('@user_prefs');
 
-// MMKV — synchronous, 10x faster than AsyncStorage. Preferred for production.
+// MMKV — synchronous, much faster than AsyncStorage. Preferred for production.
 import { MMKV } from 'react-native-mmkv';
 const storage = new MMKV();
-storage.set('auth.token', 'eyJhbGci...');
-const token = storage.getString('auth.token');
+storage.set('user.theme', 'dark');
+const theme = storage.getString('user.theme');
 
 // Secure Storage — for tokens and secrets (uses iOS Keychain / Android Keystore)
 import * as SecureStore from 'expo-secure-store';
-await SecureStore.setItemAsync('access_token', token);
-const token = await SecureStore.getItemAsync('access_token');
+await SecureStore.setItemAsync('access_token', accessToken);
+const savedToken = await SecureStore.getItemAsync('access_token');
 ```
+
+> **Pick the right store for the data.** AsyncStorage and MMKV are *not* encrypted by
+> default — never put access tokens, refresh tokens, or personal data in them. Tokens
+> go in SecureStore / Keychain / Keystore. This distinction gets asked about in
+> interviews and gets flagged in security reviews.
 
 ### Network Connectivity & Resilience
 
@@ -532,21 +537,33 @@ const unsubscribe = NetInfo.addEventListener(state => {
   console.log('Is fast:', state.details?.isConnectionExpensive === false);
 });
 
-// Retry logic with exponential backoff
+// Retry logic with exponential backoff AND jitter
 const fetchWithRetry = async (url, options, retries = 3) => {
   for (let attempt = 0; attempt < retries; attempt++) {
     try {
       const response = await fetch(url, options);
-      if (!response.ok && response.status >= 500) throw new Error('Server error');
+      // Only retry on server errors — a 400/401/404 will fail identically forever
+      if (response.status >= 500) throw new Error(`Server error ${response.status}`);
       return response;
     } catch (error) {
       if (attempt === retries - 1) throw error;
-      const delay = Math.pow(2, attempt) * 1000; // 1s, 2s, 4s
+
+      const base = Math.pow(2, attempt) * 1000;    // 1s, 2s, 4s
+      const delay = base * (0.5 + Math.random());  // jitter: 0.5x–1.5x of base
       await new Promise(resolve => setTimeout(resolve, delay));
     }
   }
 };
 ```
+
+> **Why jitter matters.** If your backend hiccups for 5 seconds, every phone using
+> your app retries at *exactly* 1s, 2s, 4s. All of them hit the recovering server at
+> the same instant and knock it over again — a **thundering herd**. Randomising the
+> delay spreads the retries out. Backoff without jitter is a real outage cause, not
+> a theoretical one.
+>
+> Also note **which errors are safe to retry**: retrying a `GET` is free, retrying a
+> `POST /orders` can create two orders. That's what idempotency keys solve (Floor 3).
 
 ### App Lifecycle
 
@@ -602,9 +619,14 @@ JavaScript is **single-threaded** — one piece of code runs at a time. The even
           ↓ when empty
 ┌─────────────────────────────────────┐
 │        Macro-task Queue             │  ← setTimeout, setInterval, I/O, UI events
-│  (setTimeout, setInterval, fetch)   │  ← One task per event loop iteration
+│  (timers, network completion)       │  ← One task per event loop iteration
 └─────────────────────────────────────┘
 ```
+
+> **Where does `fetch` sit?** The network completing is a macro-task — but the
+> `.then()` / `await` continuation that runs after it is a **microtask**. So a
+> `fetch` resolving does not give the UI a chance to breathe between chained
+> `.then()`s. Only a real macro-task boundary (`setTimeout(fn, 0)`) does that.
 
 ```javascript
 console.log('1 — synchronous, runs immediately');
@@ -721,7 +743,17 @@ React Native runs across three threads:
 | **UI Thread (Main)** | Native view rendering, system gestures, UIKit/Android View |
 | **Shadow Thread** | Yoga layout calculations (Flexbox) |
 
-The JS bridge (old arch) or JSI (new arch) handles communication between threads.
+Communication between those threads used to go through the **bridge** — an
+asynchronous, batched, JSON-serialised channel. That bridge is gone. The New
+Architecture (JSI + Fabric + TurboModules, "bridgeless") became the default in
+React Native **0.76**, could no longer be disabled from **0.82**, and the bridge
+code was removed outright in **0.85**. JSI lets JavaScript hold direct references to
+native objects and call them synchronously, which is why Reanimated worklets and
+MMKV can do work without a round trip.
+
+Interview-relevant consequence: "the bridge is the bottleneck" is now an outdated
+answer. The modern answer is that the JS thread is still single-threaded, so
+blocking it still drops frames — the cost model changed, the constraint didn't.
 
 ```javascript
 // Animations on JS thread — can drop frames if JS thread is busy
@@ -759,4 +791,4 @@ opacity.value = withTiming(1); // Runs on UI thread, no JS involvement
 
 ---
 
-*Next: Floor 2 — OOP and Design Patterns*
+*Previous: [Floor 0 — The Design Process](../Floor0-The-Design-Process/resource.md) · Next: [Floor 2 — OOP and Design Patterns](../Floor2-OOP-SOLID/resource.md) · [Index](../README.md)*

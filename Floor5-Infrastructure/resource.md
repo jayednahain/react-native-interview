@@ -24,17 +24,17 @@ Docker solution: "Works in my container" = works everywhere the container runs.
 ### Dockerfile — Building an Image
 
 ```dockerfile
-# Start from an official Node.js base image
-FROM node:20-alpine
+# ---------- Stage 1: build ----------
+# Needs devDependencies (TypeScript, etc.) to compile
+FROM node:20-alpine AS build
 
-# Set working directory inside the container
 WORKDIR /app
 
 # Copy dependency files first (for layer caching)
 COPY package.json package-lock.json ./
 
-# Install dependencies
-RUN npm ci --only=production
+# Install ALL dependencies, including dev — the compiler lives there
+RUN npm ci
 
 # Copy the rest of the source code
 COPY . .
@@ -42,12 +42,36 @@ COPY . .
 # Build the TypeScript project
 RUN npm run build
 
+# ---------- Stage 2: runtime ----------
+# Ships only what's needed to run — smaller image, smaller attack surface
+FROM node:20-alpine AS runtime
+
+WORKDIR /app
+ENV NODE_ENV=production
+
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev && npm cache clean --force
+
+# Copy only the compiled output from the build stage
+COPY --from=build /app/dist ./dist
+
+# Don't run as root
+USER node
+
 # Tell Docker which port the app uses
 EXPOSE 3000
 
 # Command to run when the container starts
 CMD ["node", "dist/server.js"]
 ```
+
+> **Two traps this avoids.**
+> 1. A single-stage image that runs `npm ci --omit=dev` (the modern spelling of the
+>    deprecated `--only=production`) and *then* `npm run build` will fail — you just
+>    deleted the TypeScript compiler you're about to invoke. Build with dev deps,
+>    ship without them.
+> 2. Containers run as `root` unless you say otherwise. `USER node` is one line and
+>    it's the first thing a security review looks for.
 
 ### Common Docker Commands
 
@@ -84,7 +108,7 @@ When your backend needs a database and a Redis cache, Docker Compose orchestrate
 
 ```yaml
 # docker-compose.yml
-version: '3.9'
+# (No `version:` key — it was made obsolete by Compose V2 and now prints a warning.)
 
 services:
   api:
@@ -127,17 +151,20 @@ volumes:
 ```
 
 ```bash
+# Modern Compose is a docker subcommand: `docker compose`, not `docker-compose`.
+# The old hyphenated V1 binary is end-of-life.
+
 # Start all services
-docker-compose up
+docker compose up
 
 # Start in background
-docker-compose up -d
+docker compose up -d
 
 # Stop all services
-docker-compose down
+docker compose down
 
 # Rebuild and restart
-docker-compose up --build
+docker compose up --build
 ```
 
 This is the local backend setup for a React Native developer. When you `npx react-native run-android` alongside `docker-compose up`, your app has a full backend stack running locally.
@@ -404,12 +431,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Preferred: OIDC. GitHub proves its identity to AWS and receives a
+      # short-lived token. No long-lived access keys stored in repo secrets —
+      # nothing to leak, nothing to rotate. Requires `permissions: id-token: write`.
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: arn:aws:iam::123456789012:role/github-actions-deploy
           aws-region: us-east-1
+
+      # Legacy alternative — static keys in secrets. Works, but they are
+      # long-lived credentials sitting in a repo. Migrate off these when you can.
+      # with:
+      #   aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      #   aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
       - name: Login to Amazon ECR
         id: login-ecr
@@ -564,45 +599,67 @@ end
 
 ---
 
-## 5.4 OTA Updates — CodePush
+## 5.4 OTA Updates — Shipping JavaScript Without a Store Review
 
 Over-the-air (OTA) updates let you push JavaScript bundle changes to users **without going through the App Store or Play Store**. Only JavaScript and assets can be updated this way — native code always requires a store update.
 
+> ### ⚠️ CodePush as you knew it is gone
+>
+> Microsoft **retired App Center, including the hosted CodePush service, on
+> 31 March 2025**, and archived the open-sourced CodePush server repository in
+> May 2025. Any tutorial telling you to run `appcenter codepush release-react`
+> is describing a service that no longer accepts requests.
+>
+> There is a second, quieter problem: CodePush's reload mechanism was built on the
+> legacy JS bridge, which is disabled in bridgeless mode — the default since React
+> Native 0.76 and mandatory from 0.82. So even self-hosted CodePush forks need
+> bridgeless-aware patches on a current React Native.
+
+### The current options
+
+| Option | What it is | Good fit when |
+|--------|-----------|--------------|
+| **`expo-updates` / EAS Update** | Expo's hosted OTA service. Works in bare React Native, not just Expo-managed apps. | Default recommendation. You want it to just work and are OK paying. |
+| **Self-hosted CodePush fork** | Community forks of the archived server (e.g. `code-push-server` forks, `@shm-open/code-push-cli`) | You must keep data in-house, and you have ops capacity for a server + CDN + DB. |
+| **Third-party hosted** | `hot-updater`, RN Stallion, Revopush and similar drop-in replacements | You want a managed migration path off CodePush without adopting Expo. |
+
 ```javascript
-// App.tsx — integrate CodePush
-import CodePush from 'react-native-code-push';
+// App.tsx — the modern equivalent, using expo-updates
+import * as Updates from 'expo-updates';
+import { useEffect } from 'react';
 
-const codePushOptions = {
-  checkFrequency: CodePush.CheckFrequency.ON_APP_RESUME,
-  updateDialog: {
-    appendReleaseDescription: true,
-    title: 'Update available',
-  },
-  installMode: CodePush.InstallMode.IMMEDIATE,
+const useOtaUpdates = () => {
+  useEffect(() => {
+    const check = async () => {
+      // Never check for updates against the dev server
+      if (__DEV__) return;
+
+      try {
+        const update = await Updates.checkForUpdateAsync();
+        if (update.isAvailable) {
+          await Updates.fetchUpdateAsync();
+          // Applied on next launch, or immediately with reloadAsync()
+          await Updates.reloadAsync();
+        }
+      } catch (error) {
+        // An OTA failure must NEVER block app start — log and carry on
+        console.warn('OTA check failed', error);
+      }
+    };
+
+    check();
+  }, []);
 };
-
-const App = () => {
-  return (
-    <NavigationContainer>
-      <AppNavigator />
-    </NavigationContainer>
-  );
-};
-
-export default CodePush(codePushOptions)(App);
 ```
 
-```bash
-# Deploy a JS bundle update via CodePush
-appcenter codepush release-react \
-  -a myorg/MyApp-iOS \
-  -d Production \
-  --target-binary-version "~1.2.0" \
-  --description "Fix crash on profile screen"
-```
+**When to use OTA:** Bug fixes, UI tweaks, copy changes, A/B tests, config flips.
+**When you MUST use a store update:** New native modules, changed permissions, binary dependencies, anything touching the native project.
 
-**When to use OTA:** Bug fixes, UI tweaks, copy changes, A/B tests.
-**When you MUST use a store update:** New native modules, permissions, binary dependencies.
+> **The rule that keeps you out of trouble:** an OTA bundle must be compatible with
+> the *native binary already on the device*. Ship a JS bundle that calls a native
+> module the installed binary doesn't contain and you have just crashed every user on
+> launch, with no way to push a fix to an app that won't start. Always gate OTA
+> releases on a native runtime version, and always keep a rollback ready.
 
 ---
 
@@ -720,10 +777,18 @@ const uploadAvatar = async (imageUri) => {
   });
 
   // 2. Upload directly to S3 — no traffic through your server
+  //
+  // NOTE: `fetch(localUri).then(r => r.blob())` reads the whole file into JS memory
+  // and has a long history of breaking on large files in React Native. For anything
+  // bigger than a thumbnail, stream from the file path instead — e.g.
+  // react-native-blob-util's `ReactNativeBlobUtil.wrap(path)` — so the bytes never
+  // pass through the JS thread.
+  const file = await fetch(imageUri).then(r => r.blob());
+
   await fetch(uploadUrl, {
     method: 'PUT',
     headers: { 'Content-Type': 'image/jpeg' },
-    body: await fetch(imageUri).then(r => r.blob()),
+    body: file,
   });
 
   // 3. Tell your server the upload is done
@@ -902,21 +967,25 @@ try {
 
 Never hardcode configuration. Separate config from code.
 
-```javascript
-// .env — local development (NEVER commit to git)
+```bash
+# .env — local development (NEVER commit to git; add it to .gitignore)
 DATABASE_URL=postgres://user:password@localhost:5432/myapp_dev
 REDIS_URL=redis://localhost:6379
 JWT_SECRET=dev_only_secret_not_for_production
 API_BASE_URL=http://localhost:3000
 
-// .env.staging
-DATABASE_URL=postgres://...
-API_BASE_URL=https://staging-api.myapp.com
+# .env.staging
+# API_BASE_URL=https://staging-api.myapp.com
 
-// .env.production
-DATABASE_URL=postgres://...
-API_BASE_URL=https://api.myapp.com
+# .env.production
+# API_BASE_URL=https://api.myapp.com
 ```
+
+> **Mobile-specific warning:** anything you put in a React Native `.env` is compiled
+> into the app bundle and is trivially readable by anyone who downloads your APK.
+> `react-native-config` is for *configuration* (base URLs, feature flags, public
+> keys) — **not for secrets**. There is no such thing as a secret on a client. If an
+> API key must stay private, it belongs on your server, and the app calls your server.
 
 ```javascript
 // Validate env vars at startup — fail fast if something is missing
@@ -943,7 +1012,9 @@ export default env;
 import Config from 'react-native-config';
 
 const apiClient = new ApiClient(Config.API_BASE_URL);
+```
 
+```groovy
 // android/app/build.gradle — use different .env per build type
 android {
   buildTypes {
@@ -1075,4 +1146,6 @@ Every floor played a role. That is system design in production.
 
 ---
 
-*You have now covered all five floors. Review them in order. The end-to-end diagram above is the architecture you understand.*
+*Previous: [Floor 4 — Backend Architecture](../Floor4-Backend-Architecture/resource.md) · [Index](../README.md)*
+
+*You have now covered every floor. Go back to [Floor 0's practice problems](../Floor0-The-Design-Process/resource.md#06-practice--do-these-in-order) and design something end to end — that's where reading turns into skill.*

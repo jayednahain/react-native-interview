@@ -535,6 +535,103 @@ In Kubernetes (Floor 5), service discovery is built-in — services find each ot
 
 ---
 
+## 3.11 Reliability Patterns You Will Be Asked About
+
+Circuit breakers (3.9) are one of a family. These are the rest, and mobile clients make every one of them matter more, because phones retry on flaky networks constantly.
+
+### Idempotency Keys — the one every mobile dev needs
+
+Your app POSTs an order. The network dies before the response arrives. Did the order get created? The app doesn't know. If it retries, the user might be charged twice.
+
+Idempotent *verbs* (GET, PUT, DELETE) don't help here — `POST /orders` is inherently non-idempotent. The fix is an **idempotency key**: the client generates a unique ID for the *attempt*, and the server guarantees that key can only ever produce one result.
+
+```javascript
+// Client — the key is generated ONCE per user intent, not per retry
+const placeOrder = async (cart) => {
+  const idempotencyKey = uuidv4();   // Generated when the user taps "Place Order"
+
+  return fetchWithRetry('/v1/orders', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Idempotency-Key': idempotencyKey,   // SAME key on every retry
+    },
+    body: JSON.stringify(cart),
+  });
+};
+```
+
+```javascript
+// Server — store the result against the key, replay it on repeat
+const createOrder = async (req, res) => {
+  const key = req.headers['idempotency-key'];
+  if (!key) return res.status(400).json({ error: 'Idempotency-Key required' });
+
+  const existing = await redis.get(`idem:${key}`);
+  if (existing) {
+    // This exact attempt already succeeded — replay the original response.
+    // No second order. No second charge.
+    return res.status(200).json(JSON.parse(existing));
+  }
+
+  const order = await orderService.create(req.user.id, req.body);
+  await redis.setEx(`idem:${key}`, 24 * 60 * 60, JSON.stringify(order));
+
+  res.status(201).json(order);
+};
+```
+
+> **The critical detail interviewers listen for:** the key must be generated when the
+> *user forms the intent*, not inside the retry loop. Generate it per-retry and you
+> have implemented nothing at all. This is how Stripe's API works, and it's why
+> `Idempotency-Key` is a header you'll meet in real payment integrations.
+
+### Timeouts
+
+A request with no timeout is a resource leak with extra steps. If a downstream service hangs, every caller's connection pool fills with requests waiting forever, and the failure spreads upward. **Every network call needs a timeout**, and the timeout budget must shrink as you go deeper:
+
+```
+Mobile client:  10s
+  → API Gateway:  8s
+    → Order Service:  5s
+      → Inventory Service:  2s
+```
+
+If the inner call had the longer timeout, the outer one would give up first and the work would be wasted anyway.
+
+### Retries — and when NOT to
+
+| Retry | Don't retry |
+|-------|------------|
+| 500, 502, 503, 504 (server-side, likely transient) | 400, 401, 403, 404, 422 (your request is wrong — it will fail identically) |
+| Network timeouts, connection resets | 409 Conflict (needs a real decision) |
+| 429, but only after `Retry-After` | Anything non-idempotent without an idempotency key |
+
+Always with exponential backoff **and jitter** (Floor 1). Always with a retry cap.
+
+### Graceful Degradation and Load Shedding
+
+When the system is overloaded, serving everyone slowly is worse than serving most people fast.
+
+- **Graceful degradation** — the recommendations service is down, so the feed renders without the "For You" row instead of showing an error page. Core path survives; the garnish disappears.
+- **Load shedding** — the server is at capacity, so it rejects low-priority requests (analytics, prefetch) immediately with 503 to protect high-priority ones (checkout).
+
+For a mobile app this is a design decision you own: decide in advance which parts of a screen are essential and which can render empty. That decision is exactly what "designing for failure" means.
+
+### Cache Stampede
+
+A popular cache key expires. Ten thousand requests miss simultaneously and all hit the database at once — which then falls over.
+
+Fixes: a short lock so only one request rebuilds the value while others serve stale; or randomised TTLs so keys don't all expire together; or refreshing the cache in the background before expiry.
+
+### Consistent Hashing
+
+If you have 4 cache servers and route with `hash(key) % 4`, adding a fifth server changes the destination of **almost every key** — the entire cache is instantly invalid, and the stampede above happens across the whole system.
+
+**Consistent hashing** maps servers and keys onto the same ring, so adding or removing a node only remaps the keys immediately adjacent to it — roughly `1/n` of them instead of all of them. This is what Redis Cluster, Cassandra, and DynamoDB use to partition data.
+
+---
+
 ## Summary
 
 | Concept | One-line summary |
@@ -557,7 +654,12 @@ In Kubernetes (Floor 5), service discovery is built-in — services find each ot
 | Event-driven | Services react to events. Decoupled but hard to trace. |
 | Circuit breaker | Stop cascading failures. Open/closed/half-open states. |
 | Service discovery | Services find each other dynamically. |
+| Idempotency key | Client-generated key per intent. Makes POST safe to retry. |
+| Timeouts | Every call needs one. Budgets shrink as you go deeper. |
+| Graceful degradation | Drop non-essential features instead of failing the whole screen. |
+| Cache stampede | Simultaneous misses crush the DB. Fix with locks or jittered TTLs. |
+| Consistent hashing | Adding a node remaps ~1/n keys, not all of them. |
 
 ---
 
-*Next: Floor 4 — Backend Architecture*
+*Previous: [Floor 2 — OOP and Design Patterns](../Floor2-OOP-SOLID/resource.md) · Next: [Floor 3.5 — Mobile System Design](../Floor3.5-Mobile-System-Design/resource.md) · [Index](../README.md)*

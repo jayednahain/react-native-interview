@@ -755,6 +755,11 @@ export const userRepository = new UserRepositoryImpl(); // Singleton by module
 
 Constructs complex objects **step by step**. Useful when an object has many optional fields.
 
+> The version below is a **fluent builder** — the builder and the product are the same
+> object, and `execute()` acts as the `build()` step. That is the common JS/TS shape.
+> A textbook (Gang of Four) builder keeps them separate: `new RequestBuilder()...build()`
+> returns a distinct, immutable `HttpRequest`. Know both; interviewers may ask for either.
+
 ```typescript
 class HttpRequest {
   private method: string = 'GET';
@@ -916,9 +921,13 @@ React itself is built on this idea. You don't extend components; you compose the
 
 ```typescript
 // ❌ Deep inheritance chain — fragile, hard to follow
-class Component extends BaseComponent
-  extends WithAuth extends WithLogging
-    extends WithAnalytics { }
+// (Note: JavaScript has SINGLE inheritance — you cannot write `extends A extends B`.
+//  You are forced into a chain, which is exactly what makes this painful.)
+class WithLogging extends BaseComponent {}
+class WithAnalytics extends WithLogging {}
+class WithAuth extends WithAnalytics {}
+class ProductScreenClass extends WithAuth {}
+// To find where a method comes from, you now walk four files.
 
 // ✅ Composition with hooks — each concern is independent and reusable
 const ProductScreen = () => {
@@ -975,6 +984,147 @@ user.toJSON();   // '{"name":"Alice","email":"alice@example.com"}'
 
 ---
 
+## 2.6 Layered Architecture — MVC, MVVM, and Clean Architecture
+
+This is the section that answers *"every layer has a different system design — what are the layers?"*
+
+Patterns (2.4) organise **individual classes**. Layers organise the **whole app**. A layer is a group of code that is allowed to depend on the layers below it, and never on the layers above it. That one rule is the whole idea.
+
+### The three names you'll hear
+
+| Pattern | Splits into | Where you meet it |
+|---------|------------|------------------|
+| **MVC** | Model, View, Controller | Classic web frameworks (Rails, Django, Spring) |
+| **MVVM** | Model, View, ViewModel | Android (Jetpack), iOS (SwiftUI), and effectively React |
+| **Clean / Hexagonal** | Presentation, Domain, Data | Large apps that must survive framework churn |
+
+React Native is **MVVM by default and nobody says so out loud**:
+
+```
+View        = your component's JSX  (dumb, renders props)
+ViewModel   = your custom hook       (holds state, exposes actions)
+Model       = your repository/service + the types it returns
+```
+
+```typescript
+// Model — plain data + the thing that fetches it. Knows nothing about React.
+type Order = { id: string; total: number; status: 'pending' | 'paid' };
+
+class OrderRepository {
+  async getOrders(userId: string): Promise<Order[]> { /* API / cache / DB */ }
+}
+
+// ViewModel — owns state and behaviour. Knows about React, not about JSX.
+const useOrders = (userId: string) => {
+  const [orders, setOrders] = useState<Order[]>([]);
+  const [status, setStatus] = useState<'idle' | 'loading' | 'error'>('idle');
+
+  useEffect(() => {
+    setStatus('loading');
+    orderRepository.getOrders(userId)
+      .then(o => { setOrders(o); setStatus('idle'); })
+      .catch(() => setStatus('error'));
+  }, [userId]);
+
+  const unpaidTotal = useMemo(
+    () => orders.filter(o => o.status === 'pending').reduce((s, o) => s + o.total, 0),
+    [orders],
+  );
+
+  return { orders, status, unpaidTotal };
+};
+
+// View — renders. No fetching, no business rules, no formatting decisions.
+const OrdersScreen = ({ userId }: { userId: string }) => {
+  const { orders, status, unpaidTotal } = useOrders(userId);
+
+  if (status === 'loading') return <Skeleton />;
+  if (status === 'error')   return <ErrorView />;
+
+  return (
+    <>
+      <Text>Unpaid: ${unpaidTotal}</Text>
+      <FlatList data={orders} renderItem={({ item }) => <OrderRow order={item} />} />
+    </>
+  );
+};
+```
+
+### Clean Architecture — the three-layer version
+
+When apps get big, MVVM's "Model" gets split in two, and a **Domain** layer appears in the middle:
+
+```
+┌──────────────────────────────────────────────────────┐
+│  PRESENTATION   components, hooks, navigation        │
+│                 (knows React Native)                 │
+└───────────────────────┬──────────────────────────────┘
+                        │ depends on ↓
+┌───────────────────────▼──────────────────────────────┐
+│  DOMAIN         entities, use cases, business rules  │
+│                 (knows NOTHING — pure TypeScript)    │
+└───────────────────────▲──────────────────────────────┘
+                        │ depends on ↑  (inverted!)
+┌───────────────────────┴──────────────────────────────┐
+│  DATA           repositories, API clients, storage   │
+│                 (knows fetch, MMKV, SQLite)          │
+└──────────────────────────────────────────────────────┘
+```
+
+**The dependency rule:** arrows point *inward*. Domain is the centre and depends on nothing. Data depends on Domain (it implements interfaces the Domain declares). Presentation depends on Domain. Data and Presentation never touch each other directly.
+
+That inward-pointing arrow from Data is the **Dependency Inversion Principle** from 2.3 — applied at the scale of the whole app instead of a single class. This is the payoff of SOLID: the same five rules, one zoom level up.
+
+```typescript
+// domain/ — no imports from react, react-native, or fetch. Pure logic.
+export interface OrderRepository {          // Domain DECLARES what it needs
+  getOrders(userId: string): Promise<Order[]>;
+}
+
+export class GetUnpaidTotal {               // A use case: one business action
+  constructor(private repo: OrderRepository) {}
+
+  async execute(userId: string): Promise<number> {
+    const orders = await this.repo.getOrders(userId);
+    return orders
+      .filter(o => o.status === 'pending')
+      .reduce((sum, o) => sum + o.total, 0);
+  }
+}
+
+// data/ — Data layer IMPLEMENTS the domain's interface
+export class ApiOrderRepository implements OrderRepository {
+  async getOrders(userId: string): Promise<Order[]> {
+    const res = await fetch(`/api/users/${userId}/orders`);
+    return res.json();
+  }
+}
+
+// presentation/ — the hook wires it together
+const useUnpaidTotal = (userId: string) => {
+  const [total, setTotal] = useState(0);
+  useEffect(() => {
+    new GetUnpaidTotal(new ApiOrderRepository()).execute(userId).then(setTotal);
+  }, [userId]);
+  return total;
+};
+```
+
+### Is this worth the folders?
+
+Be honest about the trade-off, because interviewers will probe it:
+
+| | Worth it | Not worth it |
+|--|---------|-------------|
+| Team size | 4+ devs on one codebase | Solo or two devs |
+| Lifespan | Multi-year product | MVP, prototype, contract job |
+| Business logic | Complex rules, many edge cases | Mostly "fetch JSON, show list" |
+| Testing | You need logic tested without a device | Manual QA is fine |
+
+A three-screen app with full Clean Architecture is **more code to read for zero benefit**. The skill isn't knowing the layers — it's knowing when a layer earns its keep. Saying *"I'd start with hooks + repositories, and extract a domain layer once the business rules outgrow the hooks"* is a stronger answer than reciting the diagram.
+
+---
+
 ## Summary Table
 
 | Concept | One-line summary |
@@ -998,7 +1148,9 @@ user.toJSON();   // '{"name":"Alice","email":"alice@example.com"}'
 | Strategy | Swap algorithms at runtime without changing calling code. |
 | Adapter | Make an incompatible interface fit your expected interface. |
 | Composition | Combine small, focused pieces instead of deep inheritance. |
+| MVVM | View (JSX) + ViewModel (hook) + Model (repository). React Native's default shape. |
+| Clean Architecture | Presentation → Domain ← Data. Dependencies point inward. DIP at app scale. |
 
 ---
 
-*Next: Floor 3 — High-Level System Design*
+*Previous: [Floor 1 — Fundamentals](../Floor1-Fundamentals/resource.md) · Next: [Floor 3 — High-Level System Design](../Floor3-HighLevel-SystemDesign/resource.md) · [Index](../README.md)*

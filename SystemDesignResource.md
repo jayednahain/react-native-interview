@@ -1,6 +1,11 @@
-# System Design — Floor by Floor
+# System Design — Floor by Floor (Condensed Overview)
 
-> A complete learning guide for app developers. Start at Floor 1. Do not skip floors.
+> **This file is the 20-minute skim.** It summarises all five floors in one page,
+> using Kotlin examples. The detailed, React Native / TypeScript versions live in the
+> floor folders — see [`README.md`](./README.md) for the full path, including
+> **Floor 0**, which is the step-by-step process for actually *doing* a design.
+>
+> Read this to get the shape of the whole building. Read the floors to learn it.
 
 ---
 
@@ -37,7 +42,7 @@ As a mobile developer, you already do this every day. The vocabulary to know:
 ### 1.2 Networking basics
 
 - **TCP/IP** — the protocol that makes data reliably travel across the internet, in order, without loss
-- **DNS** — translates `api.myapp.com` into an IP address (`192.168.1.1`)
+- **DNS** — translates `api.myapp.com` into a public IP address (`54.201.45.23`)
 - **TLS/HTTPS** — encrypts the connection so nobody can read your data in transit
 - **Latency vs bandwidth** — latency is how long one request takes (milliseconds); bandwidth is how much data flows per second
 
